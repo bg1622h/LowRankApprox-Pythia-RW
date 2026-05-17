@@ -1,4 +1,15 @@
-from pythia import Pythia
+try:
+    from .llama import Llama, LlamaAttentionBackend, LlamaSize
+    from .pythia import Pythia, PythiaAttentionBackend, PythiaSize
+except ImportError:
+    from llama import Llama, LlamaAttentionBackend, LlamaSize
+    from pythia import Pythia, PythiaAttentionBackend, PythiaSize
+
 __all__ = [
-    'Pythia'
+    "Llama",
+    "LlamaAttentionBackend",
+    "LlamaSize",
+    "Pythia",
+    "PythiaAttentionBackend",
+    "PythiaSize",
 ]

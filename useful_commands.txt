@@ -1,0 +1,9 @@
+ps aux --sort=-%mem
+nvidia-smi
+python -c "import flash_attn; print(f'Flash Attention version: {flash_attn.__version__}')"
+
+
+
+Скачивание.
+python scripts/cache_refinedweb.py --output-dir ./my_dataset_shards --max-gb 400 --num-workers 24
+

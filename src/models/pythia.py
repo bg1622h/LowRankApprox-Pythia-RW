@@ -1,5 +1,13 @@
 from enum import Enum
-from transformers import GPTNeoXForCausalLM, AutoTokenizer
+
+from transformers import AutoTokenizer, GPTNeoXForCausalLM
+
+
+class PythiaAttentionBackend(Enum):
+    EAGER = "eager"
+    FLASH_ATTENTION_2 = "flash_attention_2"
+    SDPA = "sdpa"
+    FLEX = "flex_attention"
 
 
 class PythiaSize(Enum):
@@ -14,7 +22,12 @@ class PythiaSize(Enum):
     P6_9B = ("6.9B", 6_857_302_016, 6_444_163_072)
     P12B = ("12B", 11_846_072_320, 11_327_027_200)
 
-    def __init__(self, suffix: str, total_params: int, non_embedding_params: int):
+    def __init__(
+        self,
+        suffix: str,
+        total_params: int,
+        non_embedding_params: int,
+    ):
         self.suffix = suffix
         self.total_params = total_params
         self.non_embedding_params = non_embedding_params
@@ -50,18 +63,48 @@ class Pythia:
     _tokenizers = {}
 
     @classmethod
-    def get_model(cls, size: PythiaSize = PythiaSize.P31M, revision: str = "step0"):
-        if size not in cls._models:
-            cls._models[size] = GPTNeoXForCausalLM.from_pretrained(
+    def get_model(
+        cls,
+        size: PythiaSize = PythiaSize.P31M,
+        revision: str = "step0",
+        attention_backend: PythiaAttentionBackend = None,
+        torch_dtype=None,
+        gradient_checkpointing: bool = False,
+    ):
+        if attention_backend is None:
+            attention_backend = PythiaAttentionBackend.SDPA
+
+        cache_key = (
+            size,
+            revision,
+            attention_backend,
+            str(torch_dtype),
+            gradient_checkpointing,
+        )
+        if cache_key not in cls._models:
+            model_kwargs = {
+                "revision": revision,
+                "cache_dir": f"./pythia-{size.suffix.lower()}/{revision}",
+                "attn_implementation": attention_backend.value,
+            }
+            if torch_dtype is not None:
+                model_kwargs["torch_dtype"] = torch_dtype
+
+            model = GPTNeoXForCausalLM.from_pretrained(
                 size.model_name,
-                revision=revision,
-                cache_dir=f"./pythia-{size.suffix.lower()}/{revision}",
-                attn_implementation="flash_attention_2"
+                **model_kwargs,
             )
-        return cls._models[size]
+            if gradient_checkpointing:
+                model.gradient_checkpointing_enable()
+            cls._models[cache_key] = model
+        return cls._models[cache_key]
 
     @classmethod
-    def get_tokenizer(cls, size: PythiaSize = PythiaSize.P31M, revision: str = "step0"):
+    def get_tokenizer(
+        cls,
+        size: PythiaSize = PythiaSize.P31M,
+        revision: str = "step0",
+    ):
         if size not in cls._tokenizers:
             cls._tokenizers[size] = AutoTokenizer.from_pretrained(
                 size.model_name,
@@ -69,5 +112,6 @@ class Pythia:
                 cache_dir=f"./pythia-{size.suffix.lower()}/{revision}",
             )
             if cls._tokenizers[size].pad_token is None:
-                cls._tokenizers[size].pad_token = cls._tokenizers[size].eos_token
+                eos_token = cls._tokenizers[size].eos_token
+                cls._tokenizers[size].pad_token = eos_token
         return cls._tokenizers[size]

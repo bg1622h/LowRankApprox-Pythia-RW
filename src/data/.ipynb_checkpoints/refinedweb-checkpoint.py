@@ -27,8 +27,6 @@ class RefinedWebCacheConfig:
     seed: int = 42
     shuffle_buffer_size: Optional[int] = None
     token: Optional[str] = None
-    num_shards: int = 1          # <-- НОВОЕ
-    shard_index: int = 0         # <-- НОВОЕ
 
 
 @dataclass
@@ -95,10 +93,6 @@ def cache_refinedweb_subset(
         streaming=config.streaming,
         token=config.token,
     )
-    # <-- НОВОЕ: Разделяем датасет для текущего воркера
-    if config.num_shards > 1:
-        dataset = dataset.shard(num_shards=config.num_shards, index=config.shard_index)
-
     if config.shuffle_buffer_size:
         dataset = dataset.shuffle(
             seed=config.seed,
@@ -110,13 +104,8 @@ def cache_refinedweb_subset(
     shard_bytes = 0
     shard = None
 
-    # <-- НОВОЕ: Делим лимиты поровну между воркерами, чтобы суммарно получить 400 ГБ
-    max_docs_per_worker = config.max_documents // config.num_shards if config.max_documents else None
-    max_bytes_per_worker = config.max_bytes // config.num_shards if config.max_bytes else None
-
     def open_shard():
-        # <-- ИЗМЕНЕНО: Добавляем номер воркера (config.shard_index) в имя файла, чтобы избежать конфликтов
-        path = output_dir / f"{config.split}-w{config.shard_index:03d}-{shard_id:05d}.jsonl"
+        path = output_dir / f"{config.split}-{shard_id:05d}.jsonl"
         return path.open("w", encoding="utf-8")
 
     try:
@@ -158,10 +147,8 @@ def cache_refinedweb_subset(
         "config": asdict(config),
         "stats": asdict(stats),
     }
-        # <-- ИЗМЕНЕНО: Делаем имя файла метаданных уникальным для воркера
-    with (output_dir / f"metadata_w{config.shard_index:03d}.json").open("w", encoding="utf-8") as handle:
+    with (output_dir / "metadata.json").open("w", encoding="utf-8") as handle:
         json.dump(metadata, handle, ensure_ascii=False, indent=2)
-
 
     return stats
 
@@ -275,14 +262,29 @@ TokenizedCausalLMDataset = PackedCausalLMDataset
 def _tokenize_document(
     text: str,
     tokenizer,
-):
+    seq_length: int,
+) -> list[list[int]]:
     token_ids = tokenizer(
         text,
         add_special_tokens=False,
     )["input_ids"]
-    if tokenizer.eos_token_id is not None:
-        token_ids = token_ids + [tokenizer.eos_token_id]
-    return token_ids
+
+    eos_token_id = tokenizer.eos_token_id
+    chunk_size = seq_length
+    if eos_token_id is not None:
+        if seq_length < 2:
+            raise ValueError("seq_length must fit at least one token and EOS")
+        chunk_size = seq_length - 1
+
+    chunks = []
+    for start in range(0, len(token_ids), chunk_size):
+        end = start + chunk_size
+        chunk = token_ids[start:end]
+        if eos_token_id is not None:
+            chunk = chunk + [eos_token_id]
+        if chunk:
+            chunks.append(chunk)
+    return chunks
 
 
 def _make_packed_sample(
@@ -321,12 +323,8 @@ def _pack_texts(
     for text in texts:
         if not text:
             continue
-        token_ids = _tokenize_document(text, tokenizer)
-        offset = 0
-
-        while offset < len(token_ids):
-            free_space = seq_length - len(input_ids)
-            if free_space == 0:
+        for chunk in _tokenize_document(text, tokenizer, seq_length):
+            if len(input_ids) + len(chunk) > seq_length:
                 yield _make_packed_sample(
                     input_ids,
                     position_ids,
@@ -336,15 +334,11 @@ def _pack_texts(
                 position_ids = []
                 sequence_ids = []
                 sequence_id = 0
-                free_space = seq_length
 
-            end = min(offset + free_space, len(token_ids))
-            chunk = token_ids[offset:end]
             input_ids.extend(chunk)
             position_ids.extend(range(len(chunk)))
             sequence_ids.extend([sequence_id] * len(chunk))
             sequence_id += 1
-            offset = end
 
             if len(input_ids) == seq_length:
                 yield _make_packed_sample(
@@ -419,6 +413,10 @@ def _collate_causal_lm(
         output["attention_mask"] = build_packed_attention_mask(
             output["sequence_ids"],
         )
+        mask = output["attention_mask"]
+        if mask.dim() == 3:
+            mask = mask.unsqueeze(1)
+        output["attention_mask"] = mask
     return output
 
 

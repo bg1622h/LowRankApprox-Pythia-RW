@@ -133,9 +133,6 @@ class MiniAdam(torch.optim.Optimizer):
             state.pop("exp_avg", None)
 
         low_rank_grad = projector.project(grad)
-        if getattr(projector, "was_switched", False):
-            state.pop("exp_avg", None)
-
         has_exp_avg = "exp_avg" in state
         exp_avg_shape = state["exp_avg"].shape if has_exp_avg else None
         has_same_shape = exp_avg_shape == low_rank_grad.shape
@@ -195,5 +192,6 @@ class ProjectedMiniAdam(MiniAdam):
             return [{"params": params, "projector": projector}]
 
         return [{"params": params, "projector": projector}]
+
 
 GaLoreMiniAdam = ProjectedMiniAdam

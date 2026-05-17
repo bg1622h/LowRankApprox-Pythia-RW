@@ -5,7 +5,7 @@ from SVD import get_svd
 # Expected W in RR^(m times n) and m <= n, maybe sometimes we need transpose before
 class GaLore2Projector:
     def __init__(
-        self, rank: int = 8, q: int = 1, scale_factor: float = 1.0
+        self, rank: int = 8, q: int = 1, scale_factor: float = 0.25
     ):  # TODO: find real params
         self.rank = rank
         self.P = None
