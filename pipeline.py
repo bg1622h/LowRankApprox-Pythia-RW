@@ -11,6 +11,8 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",  # Формат даты и времени
     encoding="utf-8",  # Корректная запись кириллицы
 )
+
+
 def get_tensor_memory(model, optimizer=None, component="model"):
     """Считает точный размер памяти тензоров в гигабайтах."""
     mem_bytes = 0
@@ -23,7 +25,8 @@ def get_tensor_memory(model, optimizer=None, component="model"):
             for k, v in state.items():
                 if torch.is_tensor(v):
                     mem_bytes += v.numel() * v.element_size()
-    return mem_bytes / (1024**3)
+    return mem_bytes / (1024 ** 3)
+
 
 def setup_cuda_toolkit_env():
     cuda_home = "/usr/local/cuda-13.2"
@@ -35,12 +38,12 @@ def setup_cuda_toolkit_env():
     os.environ["PATH"] = f"{cuda_home}/bin:" + os.environ.get("PATH", "")
     os.environ["CPATH"] = f"{cuda_home}/targets/x86_64-linux/include"
     os.environ["LIBRARY_PATH"] = (
-        f"{cuda_home}/targets/x86_64-linux/lib/stubs:"
-        + os.environ.get("LIBRARY_PATH", "")
+            f"{cuda_home}/targets/x86_64-linux/lib/stubs:"
+            + os.environ.get("LIBRARY_PATH", "")
     )
     os.environ["LD_LIBRARY_PATH"] = (
-        f"{cuda_home}/targets/x86_64-linux/lib:"
-        + os.environ.get("LD_LIBRARY_PATH", "")
+            f"{cuda_home}/targets/x86_64-linux/lib:"
+            + os.environ.get("LD_LIBRARY_PATH", "")
     )
 
 
@@ -49,6 +52,7 @@ import torch
 import comet_ml
 from config import Config as cfg
 import sys
+
 sys.path.insert(0, os.path.abspath('./src/optimizer'))
 sys.path.insert(0, os.path.abspath('./src/models'))
 sys.path.insert(0, os.path.abspath('./src/data'))
@@ -58,12 +62,17 @@ from src.optimizer.MiniAdam import MiniAdam, GaLoreMiniAdam
 from src.optimizer.schedulers import WarmupScheduler
 from src.data import build_refinedweb_dataloader
 from src.models.llama import *
+import numpy as np
+import itertools
+
+def limit_loader(loader, n_batches):
+    return itertools.islice(loader, n_batches)
 
 def train_engine(opt_type, proj_type, args):
     cfg.setup()
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
-    
+
     exp = comet_ml.Experiment(api_key=args.key, project_name="pythia-benchmarks")
     exp.set_name(f"{opt_type}-{proj_type}-r{args.rank}")
     if cfg.scheduler:
@@ -90,7 +99,6 @@ def train_engine(opt_type, proj_type, args):
             "max_grad_norm": cfg.max_grad_norm,
         })
 
-
     # psize = PythiaSize.from_suffix(args.size)
     # attention_backend = PythiaAttentionBackend(args.attention)
     # model = Pythia.get_model(
@@ -110,7 +118,7 @@ def train_engine(opt_type, proj_type, args):
     ).cuda()
     tokenizer = Llama.get_tokenizer(lsize)
 
-    loader = build_refinedweb_dataloader(
+    train_loader = build_refinedweb_dataloader(
         data_dir=args.data,
         tokenizer=tokenizer,
         seq_length=cfg.sequence_length,
@@ -118,13 +126,24 @@ def train_engine(opt_type, proj_type, args):
         packed_attention=False,
     )
 
+    val_loader = build_refinedweb_dataloader(
+        data_dir=args.data,
+        tokenizer=tokenizer,
+        seq_length=cfg.sequence_length,
+        batch_size=cfg.batch_size,
+        packed_attention=False,
+    )
+    val_sample = next(iter(val_loader))
+
     projector = cfg.projector_map[proj_type](rank=args.rank) if proj_type != "none" else None
     if opt_type == "adammini":
         optimizer = GaLoreMiniAdam(
             model.parameters(),
             projector=projector,
             lr=cfg.lr,
-            update_gap=cfg.update_gap
+            update_gap=cfg.update_gap,
+            experiment=exp,
+            model=model,
         )
     else:
         optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
@@ -144,10 +163,10 @@ def train_engine(opt_type, proj_type, args):
     vram_model_gb = get_tensor_memory(model, component="model")
 
     for step, batch in enumerate(loader):
-        #print(tokenizer.decode(batch['input_ids'][0]))
-        #break
+        # print(tokenizer.decode(batch['input_ids'][0]))
+        # break
         if step >= cfg.steps: break
-        
+
         step_start = time.time()
         if attention_backend == PythiaAttentionBackend.FLEX:
             # FlexAttention builds the same packed causal BlockMask from reset
@@ -165,31 +184,27 @@ def train_engine(opt_type, proj_type, args):
         loss.backward()
         # 1. Получаем градиенты (loss.backward())
         # 2. Проходим по всем параметрам, которые обучаем через Lotus:
-        
+
         for p in model.parameters():
-            if hasattr(p, 'lotus_engine'): # Допустим, ты сохранил объект Lotus в параметре
+            if hasattr(p, 'lotus_engine'):  # Допустим, ты сохранил объект Lotus в параметре
                 engine = p.lotus_engine
-                
+
                 # Проецируем градиент
                 # Внутри project() может сработать смена базиса
                 low_rank_grad = engine.project(p.grad)
-                
+
                 # ИСПОЛЬЗУЕМ ФЛАГ ЗДЕСЬ:
                 if engine.was_switched:
                     # Очищаем состояния оптимизатора (m и v у Adam) именно для этого веса
                     # Это предотвращает "взрыв" весов из-за старой инерции
                     if p in optimizer.state:
-                        optimizer.state[p].clear() 
-                
-                # Заменяем полный градиент на низкоранговый для шага оптимизатора
+                        optimizer.state[p].clear()
+
+                        # Заменяем полный градиент на низкоранговый для шага оптимизатора
                 p.grad = engine.reconstruct(low_rank_grad)
 
-        torch.nn.utils.clip_grad_norm_(
-            model.parameters(),
-            max_norm=cfg.max_grad_norm,
-        )
         total_norm = torch.norm(
-        torch.stack([
+            torch.stack([
                 p.grad.norm(2)
                 for p in model.parameters()
                 if p.grad is not None
@@ -197,25 +212,29 @@ def train_engine(opt_type, proj_type, args):
             2
         )
         first_grad_norm = next(model.parameters()).grad.norm()
-        last_grad_norm =  list(model.parameters())[-1].grad.norm()
-        
+        last_grad_norm = list(model.parameters())[-1].grad.norm()
+
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
+            max_norm=cfg.max_grad_norm,
+        )
+
         vram_grads_gb = get_tensor_memory(model, component="gradients")
 
         optimizer.step()
         if scheduler:
             scheduler.step()
-        
+
         vram_opt_gb = get_tensor_memory(model, optimizer, component="optimizer")
-        
-    
-        vram_peak_gb = torch.cuda.max_memory_allocated() / (1024**3)
-        
+
+        vram_peak_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
+
         vram_activations_gb = vram_peak_gb - (vram_model_gb + vram_opt_gb + vram_grads_gb)
         vram_activations_gb = max(0, vram_activations_gb)
 
-        vram = torch.cuda.max_memory_allocated() / (1024**3)
+        vram = torch.cuda.max_memory_allocated() / (1024 ** 3)
         perplexity_loss = torch.exp(loss).item()
-        
+
         exp.log_metrics({
             "loss": loss.item(),
             "perplexity_loss": perplexity_loss if perplexity_loss < 1000 else 1000,
@@ -223,7 +242,7 @@ def train_engine(opt_type, proj_type, args):
             "vram_model_gb": vram_model_gb,
             "vram_optimizer_gb": vram_opt_gb,
             "vram_gradients_gb": vram_grads_gb,
-            "vram_activations_gb": vram_activations_gb, # Зависит от batch size и sequence length
+            "vram_activations_gb": vram_activations_gb,  # Зависит от batch size и sequence length
             "iter_time": time.time() - step_start,
             'lr': scheduler.get_last_lr()[0] if scheduler is not None else cfg.lr,
             'grad_norm': total_norm,
@@ -232,18 +251,50 @@ def train_engine(opt_type, proj_type, args):
         }, step=step)
 
         if step % 20 == 0:
+            val_loader_cur = itertools.islice(val_loader, 5)
+            model.eval()
+            with torch.no_grad():
+                total_loss = 0.0
+                total_tokens = 0
+                for _, val_batch in enumerate(val_loader_cur):
+                    with torch.autocast("cuda", dtype=torch.bfloat16):
+                        loss = model(**val_batch, use_cache=False).loss
+                        n_tokens = (val_batch["labels"] != -100).sum().item()
+                        total_loss += loss.item() * n_tokens
+                        total_tokens += n_tokens
+            mean_loss = total_loss / total_tokens
+            val_perplexity_loss = np.exp(mean_loss).item()
+            exp.log_metrics({"val_perplexity": val_perplexity_loss}, step=step)
+            # ── генерация для одного случайного примера ──────────────────────────────
+            sample = val_sample
+            input_ids = sample["input_ids"][:1]  # берём первый пример
+            prompt_len = input_ids.shape[1]
+            with torch.no_grad():
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    output_ids = model.generate(
+                        input_ids,
+                        max_new_tokens=100,
+                        do_sample=False,  # greedy — детерминированно
+                    )
+            prompt_text = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+            generated_text = tokenizer.decode(output_ids[0][prompt_len:], skip_special_tokens=True)
+            exp.log_text(f"[step {step}]\nPROMPT:\n{prompt_text}\n\nGENERATED:\n{generated_text}")
             print(f"[{opt_type}-{proj_type}] Step {step} | Loss: {loss.item():.4f} | "
+                  f"Train perplexity: {perplexity_loss:.4f} | Val perplexity: {val_perplexity_loss:.4f}"
                   f"VRAM Peak: {vram_peak_gb:.2f}GB (Model: {vram_model_gb:.2f}, "
-                  f"Opt: {vram_opt_gb:.2f}, Grads: {vram_grads_gb:.2f}, Acts: {vram_activations_gb:.2f})")
-    
+                  f"Opt: {vram_opt_gb:.2f}, Grads: {vram_grads_gb:.2f}, Acts: {vram_activations_gb:.2f})"
+                  )
+            model.train()
+
     exp.end()
     del model, optimizer
     torch.cuda.empty_cache()
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", required=False, help="Path to RefinedWeb shards", default = './my_dataset_shards')
-    parser.add_argument("--key", required=False, help="Comet ML API Key", default = 'Pd8psXxTfZFpP6RRP2es4y9zs')
+    parser.add_argument("--data", required=False, help="Path to RefinedWeb shards", default='./my_dataset_shards')
+    parser.add_argument("--key", required=False, help="Comet ML API Key", default='Pd8psXxTfZFpP6RRP2es4y9zs')
     parser.add_argument("--size", default=cfg.model_size)
     parser.add_argument("--rank", type=int, default=cfg.rank)
     parser.add_argument(
@@ -263,7 +314,7 @@ if __name__ == "__main__":
             train_engine(opt, proj, args)
         else:
             for proj in cfg.projs:
-                if proj != "none" and proj !=  "galore":
+                if proj != "none" and proj != "galore":
                     print(proj, "deniwnfiknfeifn")
                     print(f"\n>>> RUNNING EXPERIMENT: OPT={opt.upper()}, PROJ={proj.upper()}")
                     print(torch.backends.cuda.flash_sdp_enabled())
