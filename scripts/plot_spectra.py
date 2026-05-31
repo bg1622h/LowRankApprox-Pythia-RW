@@ -30,6 +30,54 @@ def _safe_name(name):
     )
 
 
+def _metric_value(record, metric):
+    if metric in ("mean_angle", "max_angle"):
+        angles = record.get("principal_angles_degrees", [])
+        if not angles:
+            return None
+        values = np.asarray(angles, dtype=float)
+        if metric == "mean_angle":
+            return float(values.mean())
+        return float(values.max())
+
+    value = record.get(metric, "")
+    if value in ("", None):
+        return None
+    return float(value)
+
+
+def _draw_group_boxplot(ax, values, labels, title, ylim=None):
+    positions = np.arange(1, len(values) + 1)
+    ax.boxplot(values, positions=positions, showfliers=True)
+
+    rng = np.random.default_rng(0)
+    for pos, group_values in zip(positions, values):
+        jitter = rng.normal(0, 0.035, size=len(group_values))
+        ax.scatter(
+            pos + jitter,
+            group_values,
+            s=14,
+            alpha=0.35,
+            color="tab:blue",
+            edgecolors="none",
+        )
+        ax.text(
+            pos,
+            max(group_values),
+            f"n={len(group_values)}",
+            ha="center",
+            va="bottom",
+            fontsize=7,
+            alpha=0.75,
+        )
+
+    ax.set_title(title)
+    ax.set_xticks(positions, labels, rotation=30, ha="right")
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    ax.grid(axis="y", alpha=0.25)
+
+
 def plot_param_spectrum(records, out_dir):
     records = sorted(records, key=lambda record: int(record["step"]))
     if not records:
@@ -91,50 +139,99 @@ def plot_group_summary(records, out_dir):
     for record in records:
         by_group[record.get("param_group", "unknown")].append(record)
 
-    rows = []
-    labels = []
-    for group, group_records in sorted(by_group.items()):
-        rank_energy = [
-            float(record["rank_energy"])
-            for record in group_records
-            if record.get("rank_energy") is not None
-        ]
-        effective_rank = [
-            float(record["effective_rank"])
-            for record in group_records
-            if record.get("effective_rank") is not None
-        ]
-        if not rank_energy or not effective_rank:
-            continue
-        labels.append(group)
-        rows.append((np.mean(rank_energy), np.mean(effective_rank)))
+    plot_specs = [
+        (
+            "spectrum_group_energy_boxplots.png",
+            "Energy captured by selected rank",
+            [("rank_energy", "rank energy @ selected rank", (0, 1.02))],
+        ),
+        (
+            "spectrum_group_effective_rank_boxplots.png",
+            "Effective spectral rank",
+            [("effective_rank", "effective rank", None)],
+        ),
+        (
+            "spectrum_group_threshold_rank_boxplots.png",
+            "Ranks needed for cumulative energy thresholds",
+            [
+                ("rank_90", "rank for 90% energy", None),
+                ("rank_95", "rank for 95% energy", None),
+                ("rank_99", "rank for 99% energy", None),
+            ],
+        ),
+        (
+            "spectrum_group_angle_boxplots.png",
+            "Principal angle stability between basis updates",
+            [
+                ("mean_angle", "mean principal angle", (0, 95)),
+                ("max_angle", "max principal angle", (0, 95)),
+            ],
+        ),
+        (
+            "spectrum_group_adaptive_rank_boxplots.png",
+            "Adaptive rank selected by stochastic projector",
+            [("adaptive_rank", "adaptive rank", None)],
+        ),
+    ]
+    labels = sorted(by_group)
 
-    if not rows:
-        return
+    written = 0
+    for filename, figure_title, metric_specs in plot_specs:
+        fig, axes = plt.subplots(
+            1,
+            len(metric_specs),
+            figsize=(5.5 * len(metric_specs), 4.5),
+            tight_layout=True,
+        )
+        axes = np.atleast_1d(axes)
+        plotted = 0
 
-    rank_energy, effective_rank = np.asarray(rows).T
-    x = np.arange(len(labels))
+        for ax, (metric, title, ylim) in zip(axes, metric_specs):
+            values = []
+            used_labels = []
+            for group in labels:
+                group_values = []
+                for record in by_group[group]:
+                    try:
+                        value = _metric_value(record, metric)
+                    except (TypeError, ValueError):
+                        continue
+                    if value is not None:
+                        group_values.append(value)
+                if group_values:
+                    used_labels.append(group)
+                    values.append(group_values)
 
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4), tight_layout=True)
-    axes[0].bar(x, rank_energy, color="steelblue")
-    axes[0].set_xticks(x, labels, rotation=30, ha="right")
-    axes[0].set_ylim(0, 1.02)
-    axes[0].set_ylabel("mean rank energy")
-    axes[0].set_title("energy at selected rank")
+            if not values:
+                ax.axis("off")
+                continue
 
-    axes[1].bar(x, effective_rank, color="darkorange")
-    axes[1].set_xticks(x, labels, rotation=30, ha="right")
-    axes[1].set_ylabel("mean effective rank")
-    axes[1].set_title("spectral effective rank")
+            _draw_group_boxplot(ax, values, used_labels, title, ylim)
+            if metric.startswith("rank") or metric == "adaptive_rank":
+                low = int(np.floor(min(min(group_values) for group_values in values)))
+                high = int(np.ceil(max(max(group_values) for group_values in values)))
+                ax.set_yticks(np.arange(low, high + 1))
+            plotted += 1
 
-    fig.savefig(Path(out_dir) / "spectrum_group_summary.png", dpi=160)
-    plt.close(fig)
+        if plotted:
+            fig.suptitle(figure_title, fontsize=13)
+            fig.savefig(Path(out_dir) / filename, dpi=160)
+            written += 1
+        plt.close(fig)
+
+    if written:
+        print(f"wrote {written} grouped boxplot figures")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("spectrum_log_dir")
     parser.add_argument("--out-dir", default="runs/spectrum_plots")
+    parser.add_argument(
+        "--with-param-plots",
+        action="store_true",
+        help="Also write one spectrum plot per projected parameter.",
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -145,10 +242,12 @@ def main():
     for record in records:
         by_param[(record["projector"], record["param_name"])].append(record)
 
-    for param_records in by_param.values():
-        plot_param_spectrum(param_records, out_dir)
+    if args.with_param_plots:
+        for param_records in by_param.values():
+            plot_param_spectrum(param_records, out_dir)
     plot_group_summary(records, out_dir)
-    print(f"wrote {len(by_param)} parameter plots and group summary to {out_dir}")
+    param_plot_count = len(by_param) if args.with_param_plots else 0
+    print(f"wrote {param_plot_count} parameter plots and grouped boxplots to {out_dir}")
 
 
 if __name__ == "__main__":
