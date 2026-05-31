@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+app.log
+
+# Local model/data caches
+llama-tiny1_1b/
+refinedweb_full_shard/
+my_dataset_shards/
+
+# Telegram export / article draft artifacts
+messages.html
+messages2.html
+output.pdf
+photos/
+css/
+images/
+js/
+
+# Hugging Face transient files
+*.lock
+*.incomplete

@@ -26,7 +26,10 @@ def get_svd(G: torch.Tensor, **kwargs):
     #EPS = 1e-6
     #G_reg = G.float() + EPS * torch.eye(G.size(-1), device=G.device) #not converge without this
     if kwargs.get("type", None) == "classic":
-        return torch.linalg.svd(G.float(), full_matrices=False, driver="gesvd")
+        g = G.float()
+        if g.is_cuda:
+            return torch.linalg.svd(g, full_matrices=False, driver="gesvd")
+        return torch.linalg.svd(g, full_matrices=False)
     elif kwargs.get("type", None) == "random":
         return randomized_svd(
             G.float(), kwargs["params"].get("rank", None), kwargs["params"].get("q", None)

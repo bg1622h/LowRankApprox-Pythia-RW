@@ -1,4 +1,5 @@
 import torch
+from diagnostics import log_spectrum_diagnostics
 from SVD import get_svd
 
 
@@ -28,7 +29,14 @@ class Lotus:
         self.pending_update = True
         
     @torch.no_grad()
-    def update_basis(self, grad: torch.Tensor):
+    def update_basis(
+        self,
+        grad: torch.Tensor,
+        param_name: str | None = None,
+        step: int | None = None,
+        experiment=None,
+        **kwargs,
+    ):
         if self.transpose is None:
             if grad.shape[0] > grad.shape[1]:
                 self.transpose = True
@@ -36,21 +44,34 @@ class Lotus:
                 self.transpose = False
 
         if self.transpose:
-            U, _, _ = get_svd(grad.T, **self.cfg)
+            U, S, _ = get_svd(grad.T, **self.cfg)
             r = min(self.rank, U.shape[1])
+            previous_basis = self.P
             self.P = U[:, :r].to(grad.dtype)
             g_init = self.P.T @ grad.T
             self.d_init = g_init / (torch.norm(g_init) + self.eps)
             self.T = 1
             self.pending_update = False
         else:
-            U, _, _ = get_svd(grad, **self.cfg)
+            U, S, _ = get_svd(grad, **self.cfg)
             r = min(self.rank, U.shape[1])
+            previous_basis = self.P
             self.P = U[:, :r].to(grad.dtype)
             g_init = self.P.T @ grad
             self.d_init = g_init / (torch.norm(g_init) + self.eps)
             self.T = 1
             self.pending_update = False
+        log_spectrum_diagnostics(
+            singular_values=S,
+            basis=self.P,
+            previous_basis=previous_basis,
+            rank=self.rank,
+            projector_name="lotus",
+            param_name=param_name,
+            step=step,
+            experiment=experiment,
+            extra={"lotus_eta": self.eta, "lotus_gamma": self.gamma},
+        )
 
     # @torch.no_grad()
     # def project(self, grad: torch.Tensor) -> torch.Tensor:

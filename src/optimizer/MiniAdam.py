@@ -176,8 +176,15 @@ class ProjectedMiniAdam(MiniAdam):
         update_gap: int = 200,
         experiment=None,
         model: torch.nn.Module | None = None,
+        max_projected_params: int | None = None,
     ):
-        param_groups = self._build_groups(params, projector, experiment, model)
+        param_groups = self._build_groups(
+            params,
+            projector,
+            experiment,
+            model,
+            max_projected_params,
+        )
         super().__init__(
             param_groups,
             lr=lr,
@@ -188,18 +195,23 @@ class ProjectedMiniAdam(MiniAdam):
             update_gap=update_gap,
         )
 
-    def _build_groups(self, params, projector, experiment, model):
+    def _build_groups(self, params, projector, experiment, model, max_projected_params):
         if model is not None:
             # Знаем имена — строим по одной группе на параметр
             groups = []
+            projected_count = 0
             for name, param in model.named_parameters():
                 if not param.requires_grad:
                     continue
-                is_2d = param.dim() == 2 and projector is not None
+                can_project = param.dim() == 2 and projector is not None
+                if max_projected_params is not None and projected_count >= max_projected_params:
+                    can_project = False
+                if can_project:
+                    projected_count += 1
                 groups.append({
                     "params": [param],
-                    "projector": copy.deepcopy(projector) if is_2d else None,
-                    "param_name": build_param_name(name) if is_2d else None,
+                    "projector": copy.deepcopy(projector) if can_project else None,
+                    "param_name": build_param_name(name) if can_project else None,
                     "experiment": experiment,
                 })
             return groups

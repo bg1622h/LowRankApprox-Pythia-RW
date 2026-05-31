@@ -1,4 +1,5 @@
 import torch
+from diagnostics import log_spectrum_diagnostics
 from SVD import get_svd
 
 
@@ -20,7 +21,14 @@ class GaLore2Projector:
         self.transpose = None
 
     @torch.no_grad()
-    def update_basis(self, grad: torch.Tensor):
+    def update_basis(
+        self,
+        grad: torch.Tensor,
+        param_name: str | None = None,
+        step: int | None = None,
+        experiment=None,
+        **kwargs,
+    ):
         if self.transpose is None:
             if grad.shape[0] > grad.shape[1]:
                 self.transpose = True
@@ -28,13 +36,25 @@ class GaLore2Projector:
                 self.transpose = False
 
         if self.transpose:
-            U, _, _ = get_svd(grad.T, **self.cfg)
+            U, S, _ = get_svd(grad.T, **self.cfg)
             r = min(self.rank, U.shape[1])
+            previous_basis = self.P
             self.P = U[:, :r].to(grad.dtype)
         else:
-            U, _, _ = get_svd(grad, **self.cfg)
+            U, S, _ = get_svd(grad, **self.cfg)
             r = min(self.rank, U.shape[1])
+            previous_basis = self.P
             self.P = U[:, :r].to(grad.dtype)
+        log_spectrum_diagnostics(
+            singular_values=S,
+            basis=self.P,
+            previous_basis=previous_basis,
+            rank=self.rank,
+            projector_name="galore2",
+            param_name=param_name,
+            step=step,
+            experiment=experiment,
+        )
 
     @torch.no_grad()
     def project(self, grad: torch.Tensor) -> torch.Tensor:

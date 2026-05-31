@@ -1,6 +1,26 @@
 from enum import Enum
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer, GPT2Config, GPT2LMHeadModel
+
+
+class SmokeTokenizer:
+    pad_token_id = 0
+    eos_token_id = 1
+    pad_token = "<pad>"
+    eos_token = "<eos>"
+
+    def __call__(self, text, add_special_tokens=False):
+        ids = [(byte % 250) + 2 for byte in text.encode("utf-8")]
+        return {"input_ids": ids}
+
+    def decode(self, token_ids, skip_special_tokens=True):
+        tokens = [
+            int(token)
+            for token in token_ids
+            if not skip_special_tokens or int(token) > self.eos_token_id
+        ]
+        return "".join(chr((token - 2) % 250) for token in tokens)
 
 
 class LlamaAttentionBackend(Enum):
@@ -11,6 +31,7 @@ class LlamaAttentionBackend(Enum):
 
 
 class LlamaSize(Enum):
+    SMOKE = "sshleifer/tiny-gpt2"
     TINY1_1B = "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T"
     L1B = "meta-llama/Llama-3.2-1B-Instruct"
     L3B = "meta-llama/Llama-3.2-3B"
@@ -18,6 +39,8 @@ class LlamaSize(Enum):
 
     @property
     def model_name(self) -> str:
+        if self is LlamaSize.TINY1_1B:
+            return "./llama-tiny1_1b/main"
         return self.value
 
     @property
@@ -29,6 +52,9 @@ class LlamaSize(Enum):
     @classmethod
     def from_suffix(cls, suffix: str):
         normalized = suffix.upper().replace(".", "_").replace("-", "_")
+        smoke_aliases = {"SMOKE", "TINY_GPT2", "TINYGPT2", "TEST"}
+        if normalized in smoke_aliases:
+            return cls.SMOKE
         tiny_aliases = {"1B", "1_1B", "TINY1_1B", "TINYLLAMA"}
         if normalized in tiny_aliases:
             return cls.TINY1_1B
@@ -42,6 +68,10 @@ class LlamaSize(Enum):
 class Llama:
     _models = {}
     _tokenizers = {}
+
+    @classmethod
+    def clear_model_cache(cls):
+        cls._models.clear()
 
     @classmethod
     def get_model(
@@ -63,6 +93,25 @@ class Llama:
             gradient_checkpointing,
         )
         if cache_key not in cls._models:
+            if size is LlamaSize.SMOKE:
+                config = GPT2Config(
+                    vocab_size=256,
+                    n_positions=128,
+                    n_embd=64,
+                    n_layer=2,
+                    n_head=4,
+                    bos_token_id=1,
+                    eos_token_id=1,
+                    pad_token_id=0,
+                )
+                model = GPT2LMHeadModel(config)
+                if torch_dtype is not None:
+                    model = model.to(dtype=torch_dtype)
+                if gradient_checkpointing:
+                    model.gradient_checkpointing_enable()
+                cls._models[cache_key] = model
+                return model
+
             model_kwargs = {
                 "revision": revision,
                 "cache_dir": f"./llama-{size.suffix.lower()}/{revision}",
@@ -71,10 +120,19 @@ class Llama:
             if torch_dtype is not None:
                 model_kwargs["torch_dtype"] = torch_dtype
 
-            model = AutoModelForCausalLM.from_pretrained(
-                size.model_name,
-                **model_kwargs,
-            )
+            try:
+                model = AutoModelForCausalLM.from_pretrained(
+                    size.model_name,
+                    **model_kwargs,
+                )
+            except (TypeError, ValueError) as exc:
+                if size is not LlamaSize.SMOKE:
+                    raise
+                model_kwargs.pop("attn_implementation", None)
+                model = AutoModelForCausalLM.from_pretrained(
+                    size.model_name,
+                    **model_kwargs,
+                )
             if gradient_checkpointing:
                 model.gradient_checkpointing_enable()
             cls._models[cache_key] = model
@@ -88,6 +146,10 @@ class Llama:
     ):
         cache_key = (size, revision)
         if cache_key not in cls._tokenizers:
+            if size is LlamaSize.SMOKE:
+                cls._tokenizers[cache_key] = SmokeTokenizer()
+                return cls._tokenizers[cache_key]
+
             tokenizer = AutoTokenizer.from_pretrained(
                 size.model_name,
                 revision=revision,
