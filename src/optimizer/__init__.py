@@ -16,4 +16,5 @@ __all__ = [
     'OldStochasticProjector',
     'StochasticProjector',
     'WarmupScheduler',
+    'FisherGaLoreProjector',
 ]
