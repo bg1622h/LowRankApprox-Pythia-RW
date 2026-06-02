@@ -37,7 +37,7 @@ class _WindowFisherProjector:
     def __init__(
         self,
         rank: int = 128,
-        candidate_rank: int = 512,
+        candidate_rank: int = 64,
         scale_factor: float = 0.25,
     ):
         self.rank = rank
@@ -211,7 +211,7 @@ class SoftmaxFisherGaLoreProjector(_WindowFisherProjector):
     def __init__(
         self,
         rank: int = 128,
-        candidate_rank: int = 512,
+        candidate_rank: int = 64,
         scale_factor: float = 0.25,
         temperature: float = 1.0,
         logit_eps: float = 1e-12,
