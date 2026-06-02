@@ -33,7 +33,7 @@ class FisherGaLoreProjector:
     def __init__(
         self,
         rank: int = 128,
-        candidate_rank: int = 512,
+        candidate_rank: int = 64,
         scale_factor: float = 0.25,
         fisher_power: float = 1.0,
         singular_power: float = 0.0,

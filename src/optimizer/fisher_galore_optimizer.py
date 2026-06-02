@@ -24,7 +24,13 @@ class FisherGaLoreOptimizer(ProjectedMiniAdam):
     def _low_rank_update(self, param, grad, state, group, beta1, projector):
         # Accumulate Fisher BEFORE the parent may refresh the basis so the
         # selection inside ``update_basis`` sees the most recent samples.
-        projector.accumulate_fisher(grad)
+        # The pipeline routes non-Fisher projectors (e.g. ``adaptive_stochastic``)
+        # through ``FisherMiniAdam`` for direct ablation; those projectors
+        # legitimately do not implement ``accumulate_fisher`` and we silently
+        # fall back to the plain ProjectedMiniAdam path for them.
+        accumulate = getattr(projector, "accumulate_fisher", None)
+        if callable(accumulate):
+            accumulate(grad)
         return super()._low_rank_update(param, grad, state, group, beta1, projector)
 
 

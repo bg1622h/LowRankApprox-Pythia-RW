@@ -14,7 +14,12 @@ from src.optimizer.Lotus import Lotus
 from src.optimizer.OldStochasticProjector import OldStochasticProjector
 from src.optimizer.StochasticProjector import StochasticProjector
 from src.optimizer.fisher_galore_projector import FisherGaLoreProjector
-from src.optimizer.block_fisher_galore_projector import BlockFisherGaLoreProjector
+from src.optimizer.block_fisher_galore_projector import (
+    BlockFisherGaLoreProjector,
+    WhitenedBlockFisherGaLoreProjector,
+    StochasticWhitenedBlockFisherGaLoreProjector,
+    AdaptiveWhitenedBlockFisherGaLoreProjector,
+)
 from src.optimizer.fisher_selection_projectors import (
     TopKFisherGaLoreProjector,
     SoftmaxFisherGaLoreProjector,
@@ -42,6 +47,9 @@ class Config:
         "adaptive_stochastic": AdaptiveStochasticProjector,
         'fisher_projector': FisherGaLoreProjector,
         'block_fisher_projector': BlockFisherGaLoreProjector,
+        'whitened_block_fisher_projector': WhitenedBlockFisherGaLoreProjector,
+        'stochastic_whitened_block_fisher_projector': StochasticWhitenedBlockFisherGaLoreProjector,
+        'adaptive_whitened_block_fisher_projector': AdaptiveWhitenedBlockFisherGaLoreProjector,
         'topk_fisher_projector': TopKFisherGaLoreProjector,
         'softmax_fisher_projector': SoftmaxFisherGaLoreProjector,
     }
