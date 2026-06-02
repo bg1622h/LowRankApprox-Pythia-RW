@@ -1,11 +1,16 @@
 import argparse
 import csv
+import inspect
 import itertools
 import logging
 import os
 import sys
+import threading
 import time
 from types import SimpleNamespace
+
+# Non-interactive backend before any matplotlib import (Windows + Comet figures).
+os.environ.setdefault("MPLBACKEND", "Agg")
 
 logging.basicConfig(
     filename="app.log",
@@ -70,30 +75,126 @@ sys.path.insert(0, os.path.abspath("./src/data"))
 from src.data import build_refinedweb_dataloader
 from src.models.llama import Llama, LlamaAttentionBackend, LlamaSize
 from src.optimizer.MiniAdam import GaLoreMiniAdam
+from src.optimizer.fisher_galore_optimizer import FisherMiniAdam
 from src.optimizer.schedulers import WarmupScheduler
 
 
-class NullExperiment:
-    def set_name(self, *args, **kwargs):
-        pass
+class TrainingExperiment:
+    """
+    Comet logging is fire-and-forget: training never waits on network/uploads.
+    Scalars always go to Comet when a backend exists; figures/samples are opt-in.
+    """
 
-    def log_parameters(self, *args, **kwargs):
-        pass
+    def __init__(
+        self,
+        backend=None,
+        *,
+        spectrum_log_dir=None,
+        allow_comet_media=False,
+        allow_comet_samples=False,
+        max_projected_params=None,
+        end_join_timeout_sec=120,
+    ):
+        self._backend = backend
+        self.spectrum_log_dir = spectrum_log_dir
+        self.no_comet_figures = not allow_comet_media
+        self.max_projected_params = max_projected_params
+        self._allow_comet_samples = allow_comet_samples
+        self._end_join_timeout_sec = end_join_timeout_sec
 
-    def log_metrics(self, *args, **kwargs):
-        pass
+    @classmethod
+    def from_args(cls, args, run_name):
+        spectrum_log_dir = args.spectrum_log_dir
+        allow_media = args.comet_figures
+        allow_samples = args.comet_samples
+        max_projected_params = args.max_projected_params
 
-    def log_text(self, *args, **kwargs):
-        pass
+        if args.no_comet:
+            exp = cls(
+                None,
+                spectrum_log_dir=spectrum_log_dir,
+                allow_comet_media=allow_media,
+                allow_comet_samples=allow_samples,
+                max_projected_params=max_projected_params,
+            )
+            exp.set_name(run_name)
+            return exp
+
+        backend = None
+        try:
+            backend = comet_ml.Experiment(
+                api_key=args.key,
+                project_name="pythia-benchmarks",
+            )
+        except Exception as exc:
+            logging.warning("Comet init failed (%s); training continues without Comet", exc)
+
+        exp = cls(
+            backend,
+            spectrum_log_dir=spectrum_log_dir,
+            allow_comet_media=allow_media,
+            allow_comet_samples=allow_samples,
+            max_projected_params=max_projected_params,
+        )
+        exp.set_name(run_name)
+        return exp
+
+    def _call(self, method, *args, wait=False, timeout=None, **kwargs):
+        if self._backend is None:
+            return
+        fn = getattr(self._backend, method, None)
+        if fn is None:
+            return
+
+        def run():
+            try:
+                fn(*args, **kwargs)
+            except Exception as exc:
+                logging.warning("Comet %s failed: %s", method, exc)
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        if not wait:
+            return
+        thread.join(timeout)
+        if thread.is_alive():
+            logging.warning(
+                "Comet %s exceeded %ss; training continues", method, timeout
+            )
+
+    def set_name(self, name):
+        self._call("set_name", name)
+
+    def log_parameters(self, params):
+        self._call("log_parameters", params)
+
+    def log_metrics(self, metrics, step=None):
+        if step is None:
+            self._call("log_metrics", metrics)
+        else:
+            self._call("log_metrics", metrics, step=step)
+
+    def log_text(self, text, step=None):
+        if not self._allow_comet_samples:
+            return
+        if step is None:
+            self._call("log_text", text)
+        else:
+            self._call("log_text", text, step=step)
 
     def log_histogram_3d(self, *args, **kwargs):
-        pass
+        if self.no_comet_figures:
+            return
+        self._call("log_histogram_3d", *args, **kwargs)
 
     def log_figure(self, *args, **kwargs):
-        pass
+        if self.no_comet_figures:
+            return
+        self._call("log_figure", *args, **kwargs)
 
     def end(self):
-        pass
+        # Only block at shutdown so the run can flush; training loop never waits.
+        self._call("end", wait=True, timeout=self._end_join_timeout_sec)
 
 
 class SmokeTokenizer:
@@ -140,7 +241,12 @@ def _batch_to_device(batch, valid_keys, device):
 
 def _build_optimizer(opt_type, model, projector, lr, update_gap, experiment):
     if opt_type == "adammini":
-        return GaLoreMiniAdam(
+        optimizer_cls = (
+            FisherMiniAdam
+            if projector is not None and hasattr(projector, "accumulate_fisher")
+            else GaLoreMiniAdam
+        )
+        return optimizer_cls(
             model.parameters(),
             projector=projector,
             lr=lr,
@@ -211,26 +317,22 @@ def train_engine(opt_type, proj_type, args):
     torch.cuda.reset_peak_memory_stats()
 
     run_name = f"{opt_type}-{proj_type}-r{args.rank}"
-    if args.no_comet:
-        exp = NullExperiment()
-    else:
-        exp = comet_ml.Experiment(api_key=args.key, project_name="pythia-benchmarks")
-    exp.max_projected_params = args.max_projected_params
-    exp.spectrum_log_dir = args.spectrum_log_dir
-    exp.set_name(run_name)
+    exp = TrainingExperiment.from_args(args, run_name)
     logged_args = {k: v for k, v in vars(args).items() if k != "key"}
-    exp.log_parameters({
-        **logged_args,
-        "opt": opt_type,
-        "proj": proj_type,
-        "seed": cfg.seed,
-        "batch_size": cfg.batch_size,
-        "sequence_length": cfg.sequence_length,
-        "tokens_per_step": cfg.batch_size * cfg.sequence_length,
-        "scheduler": cfg.scheduler,
-        "max_grad_norm": cfg.max_grad_norm,
-        "smoke": args.smoke,
-    })
+    exp.log_parameters(
+        {
+            **logged_args,
+            "opt": opt_type,
+            "proj": proj_type,
+            "seed": cfg.seed,
+            "batch_size": cfg.batch_size,
+            "sequence_length": cfg.sequence_length,
+            "tokens_per_step": cfg.batch_size * cfg.sequence_length,
+            "scheduler": cfg.scheduler,
+            "max_grad_norm": cfg.max_grad_norm,
+            "smoke": args.smoke,
+        }
+    )
 
     if args.synthetic_smoke:
         attention_backend = LlamaAttentionBackend.SDPA
@@ -276,9 +378,16 @@ def train_engine(opt_type, proj_type, args):
         device,
     )
 
-    projector = (
-        cfg.projector_map[proj_type](rank=args.rank) if proj_type != "none" else None
-    )
+    if proj_type == "none":
+        projector = None
+    else:
+        projector_cls = cfg.projector_map[proj_type]
+        projector_kwargs = {"rank": args.rank}
+        if args.candidate_rank is not None:
+            projector_signature = inspect.signature(projector_cls)
+            if "candidate_rank" in projector_signature.parameters:
+                projector_kwargs["candidate_rank"] = args.candidate_rank
+        projector = projector_cls(**projector_kwargs)
     if opt_type != "adammini" and projector is not None:
         raise ValueError(
             f"Projector '{proj_type}' requires opt_type=adammini, got {opt_type}"
@@ -405,12 +514,15 @@ def train_engine(opt_type, proj_type, args):
             )
 
             if (
-                not args.no_comet
+                args.comet_samples
                 and not args.synthetic_smoke
                 and not args.smoke
                 and step % 20 == 0
             ):
                 input_ids = val_sample["input_ids"][:1]
+                max_ctx = getattr(model.config, "max_position_embeddings", 2048)
+                gen_prompt_tokens = min(input_ids.shape[1], max(32, max_ctx - 32))
+                input_ids = input_ids[:, -gen_prompt_tokens:]
                 prompt_len = input_ids.shape[1]
                 with torch.no_grad():
                     with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -518,6 +630,12 @@ if __name__ == "__main__":
     parser.add_argument("--size", default=cfg.model_size)
     parser.add_argument("--rank", type=int, default=cfg.rank)
     parser.add_argument(
+        "--candidate-rank",
+        type=int,
+        default=None,
+        help="Candidate SVD pool size for Fisher-style projectors.",
+    )
+    parser.add_argument(
         "--attention",
         default="flash_attention_2",
         choices=["flash_attention_2", "sdpa", "eager", "flex_attention"],
@@ -536,6 +654,16 @@ if __name__ == "__main__":
         "--no-comet",
         action="store_true",
         help="Disable Comet logging for local smoke checks",
+    )
+    parser.add_argument(
+        "--comet-figures",
+        action="store_true",
+        help="Upload spectrum/Fisher figures and histograms to Comet (slow; can hang)",
+    )
+    parser.add_argument(
+        "--comet-samples",
+        action="store_true",
+        help="Log validation generation samples to Comet every val step",
     )
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
@@ -563,9 +691,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--only",
-        nargs=2,
+        nargs="+",
         metavar=("OPT", "PROJ"),
-        help="Run a single configuration, e.g. adammini lotus",
+        help=(
+            "Run adammini (or other OPT) with one or more projectors in sequence, "
+            "e.g. --only adammini fisher_projector block_fisher_projector"
+        ),
     )
     args = parser.parse_args()
 
@@ -592,8 +723,10 @@ if __name__ == "__main__":
     opts = cfg.opts
     projs = cfg.projs
     if args.only:
+        if len(args.only) < 2:
+            parser.error("--only requires OPT and at least one PROJ")
         opts = [args.only[0]]
-        projs = [args.only[1]]
+        projs = args.only[1:]
 
     for opt, proj in iter_experiments(opts, projs):
         if not _is_experiment_available(opt):

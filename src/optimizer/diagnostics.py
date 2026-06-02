@@ -3,6 +3,9 @@ import math
 import os
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -273,8 +276,11 @@ def log_fisher_diagnostics(
         f"fisher/{projector_name}/{param_name}/effective_rank": fisher_effective_rank,
         f"fisher/{projector_name}/{param_name}/accumulation_steps": int(fisher_steps),
     }
+    skip_media = bool(getattr(experiment, "no_comet_figures", True))
     try:
         experiment.log_metrics(metrics, step=step)
+        if skip_media:
+            return
         experiment.log_histogram_3d(
             fisher_cpu.numpy(),
             name=f"fisher_per_candidate/{projector_name}/{param_name}",
@@ -287,13 +293,15 @@ def log_fisher_diagnostics(
             svd_energy=svd_energy.numpy(),
             rank=rank,
         )
-        experiment.log_figure(
-            figure=fig,
-            figure_name=(
-                f"fisher/{projector_name}/{_safe_name(param_name)}/step{step:06d}"
-            ),
-        )
-        plt.close(fig)
+        try:
+            experiment.log_figure(
+                figure=fig,
+                figure_name=(
+                    f"fisher/{projector_name}/{_safe_name(param_name)}/step{step:06d}"
+                ),
+            )
+        finally:
+            plt.close(fig)
     except Exception:
         # Diagnostics should never break training.
         pass
@@ -344,19 +352,24 @@ def log_spectrum_diagnostics(
     if angles:
         metrics[f"spectrum/{projector_name}/{param_name}/mean_angle"] = float(np.mean(angles))
         metrics[f"spectrum/{projector_name}/{param_name}/max_angle"] = float(np.max(angles))
+    skip_media = bool(getattr(experiment, "no_comet_figures", True))
     try:
         experiment.log_metrics(metrics, step=step)
+        if skip_media:
+            return
         experiment.log_histogram_3d(
             sv_cpu.numpy(),
             name=f"singular_values/{projector_name}/{param_name}",
             step=step,
         )
         fig = _plot_spectrum(param_name, step, rank, singular_values, angles)
-        experiment.log_figure(
-            figure=fig,
-            figure_name=f"spectrum/{projector_name}/{_safe_name(param_name)}/step{step:06d}",
-        )
-        plt.close(fig)
+        try:
+            experiment.log_figure(
+                figure=fig,
+                figure_name=f"spectrum/{projector_name}/{_safe_name(param_name)}/step{step:06d}",
+            )
+        finally:
+            plt.close(fig)
     except Exception:
         # Diagnostics should never break training.
         pass
