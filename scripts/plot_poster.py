@@ -25,19 +25,6 @@ RUNS = [
         None,
         "stochastic",
     ),
-    ("Fisher", ROOT / "runs/refinedweb_full_fisher_both_1500_seq2048_cr128.csv", "fisher_projector", "fisher"),
-    (
-        "Block Fisher",
-        ROOT / "runs/refinedweb_full_fisher_both_1500_seq2048_cr128.csv",
-        "block_fisher_projector",
-        "fisher",
-    ),
-    (
-        "Top-k Fisher",
-        ROOT / "runs/refinedweb_full_fisher_topk_softmax_1500_seq2048_cr64.csv",
-        "topk_fisher_projector",
-        "fisher",
-    ),
     (
         "Softmax Fisher",
         ROOT / "runs/refinedweb_full_fisher_topk_softmax_1500_seq2048_cr64.csv",
@@ -50,7 +37,7 @@ STYLE = {
     "baseline": {"color": "#4472C4", "lw": 2.4},
     "baseline2": {"color": "#ED7D31", "lw": 2.4},
     "stochastic": {"color": "#70AD47", "lw": 2.6},
-    "fisher": {"color": "#C00000", "lw": 1.6, "alpha": 0.85},
+    "fisher": {"color": "#C00000", "lw": 2.4},
 }
 
 BASELINES = [
@@ -102,9 +89,8 @@ def plot_curves(out_dir: Path) -> None:
         if steps.size == 0:
             continue
         style = STYLE[group]
-        ax.plot(steps, vals, label=label, **{k: v for k, v in style.items() if k != "alpha"})
-        if "alpha" in style:
-            ax.lines[-1].set_alpha(style["alpha"])
+        kwargs = {k: v for k, v in style.items() if k != "alpha"}
+        ax.plot(steps, vals, label=label, **kwargs)
 
     ax.set_xlabel("Training step")
     ax.set_ylabel("Validation perplexity")
@@ -197,7 +183,12 @@ def plot_baselines_vs_fisher(out_dir: Path) -> None:
             None,
             "stochastic",
         ),
-        ("Fisher (avg)", ROOT / "runs/refinedweb_full_fisher_both_1500_seq2048_cr128.csv", "fisher_projector", "fisher"),
+        (
+            "Softmax Fisher",
+            ROOT / "runs/refinedweb_full_fisher_topk_softmax_1500_seq2048_cr64.csv",
+            "softmax_fisher_projector",
+            "fisher",
+        ),
     ]
     labels, vals, colors = [], [], []
     for label, path, proj, group in pick:
@@ -213,7 +204,7 @@ def plot_baselines_vs_fisher(out_dir: Path) -> None:
     bars = ax.bar(x, vals, color=colors, width=0.62)
     ax.set_xticks(x, labels, rotation=15, ha="right", fontsize=10)
     ax.set_ylabel("Val perplexity")
-    ax.set_title("Baselines vs Fisher (poster slide)")
+    ax.set_title("Baselines vs Softmax Fisher")
     ax.grid(axis="y", alpha=0.3)
     for bar, value in zip(bars, vals):
         ax.text(bar.get_x() + bar.get_width() / 2, value + 0.08, f"{value:.2f}", ha="center", fontsize=9)
