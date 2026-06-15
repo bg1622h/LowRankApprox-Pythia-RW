@@ -13,6 +13,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from method_colors import GROUP_PALETTE
+
 
 def iter_fisher_records(directory: Path):
     for path in sorted(directory.glob("fisher_*.jsonl")):
@@ -70,41 +72,68 @@ def _metric_value(record, metric: str):
     raise KeyError(metric)
 
 
-def _draw_group_boxplot(ax, values, labels, title, ylim=None):
+def _draw_group_boxplot(ax, values, labels, title, ylim=None, *, poster=False):
     positions = np.arange(1, len(values) + 1)
-    ax.boxplot(values, positions=positions, showfliers=True)
+    box_width = 0.72 if poster else 0.6
+    box_colors = [GROUP_PALETTE[i % len(GROUP_PALETTE)] for i in range(len(values))]
+    bp = ax.boxplot(
+        values,
+        positions=positions,
+        showfliers=True,
+        widths=box_width,
+        patch_artist=True,
+    )
+    for patch, color in zip(bp["boxes"], box_colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.55)
+        patch.set_edgecolor(color)
+    for median in bp["medians"]:
+        median.set_color("#222222")
+        median.set_linewidth(1.8)
     rng = np.random.default_rng(0)
-    for pos, group_values in zip(positions, values):
+    point_size = 28 if poster else 14
+    n_font = 11 if poster else 7
+    for pos, group_values, color in zip(positions, values, box_colors):
         jitter = rng.normal(0, 0.035, size=len(group_values))
         ax.scatter(
             pos + jitter,
             group_values,
-            s=14,
+            s=point_size,
             alpha=0.35,
-            color="tab:blue",
-            edgecolors="none",
+            color=color,
+            edgecolors="white",
+            linewidths=0.3,
         )
-        ax.text(
-            pos,
-            max(group_values),
-            f"n={len(group_values)}",
-            ha="center",
-            va="bottom",
-            fontsize=7,
-            alpha=0.75,
-        )
-    ax.set_title(title)
-    ax.set_xticks(positions, labels, rotation=30, ha="right")
+    title_size = 16 if poster else None
+    ax.set_title(title, fontsize=title_size)
+    tick_size = 13 if poster else None
+    ax.set_xticks(positions, labels, rotation=25 if poster else 30, ha="right", fontsize=tick_size)
     if ylim is not None:
         ax.set_ylim(*ylim)
     ax.grid(axis="y", alpha=0.25)
+    y_top = ax.get_ylim()[1]
+    y_pad = (ax.get_ylim()[1] - ax.get_ylim()[0]) * 0.02
+    for pos, group_values in zip(positions, values):
+        ax.text(
+            pos,
+            y_top + y_pad,
+            f"n={len(group_values)}",
+            ha="center",
+            va="bottom",
+            fontsize=n_font,
+            alpha=0.75,
+            clip_on=False,
+        )
+    ax.set_ylim(ax.get_ylim()[0], y_top + y_pad * 4)
+    if poster:
+        ax.tick_params(axis="y", labelsize=12)
 
 
 def _projector_label(name: str) -> str:
     return name.replace("_galore", "").replace("_", " ")
 
 
-def plot_group_summary(records, out_dir: Path, projector_filter: str | None = None):
+def plot_group_summary(records, out_dir: Path, projector_filter: str | None = None, *, poster=False, extra_out: Path | None = None):
     if projector_filter:
         records = [r for r in records if r.get("projector") == projector_filter]
 
@@ -143,12 +172,24 @@ def plot_group_summary(records, out_dir: Path, projector_filter: str | None = No
 
     written = 0
     for filename, figure_title, metric_specs in plot_specs:
+        n_panels = len(metric_specs)
+        if poster:
+            figsize = (20, 12) if n_panels >= 3 else (18, 10)
+            dpi = 300
+            suptitle_size = 20
+            layout_pad = 2.5
+        else:
+            figsize = (5.5 * n_panels, 4.8)
+            dpi = 160
+            suptitle_size = 13
+            layout_pad = 1.0
+
         fig, axes = plt.subplots(
             1,
-            len(metric_specs),
-            figsize=(5.5 * len(metric_specs), 4.8),
-            tight_layout=True,
+            n_panels,
+            figsize=figsize,
         )
+        fig.subplots_adjust(wspace=0.28 if poster else 0.2)
         axes = np.atleast_1d(axes)
         plotted = 0
 
@@ -174,13 +215,18 @@ def plot_group_summary(records, out_dir: Path, projector_filter: str | None = No
                 ax.axis("off")
                 continue
 
-            _draw_group_boxplot(ax, values, labels, title, ylim)
+            _draw_group_boxplot(ax, values, labels, title, ylim, poster=poster)
             plotted += 1
 
         if plotted:
             suffix = f" ({_projector_label(projector_filter)})" if projector_filter else ""
-            fig.suptitle(figure_title + suffix, fontsize=13)
-            fig.savefig(out_dir / filename, dpi=160)
+            fig.suptitle(figure_title + suffix, fontsize=suptitle_size, y=0.98)
+            fig.tight_layout(pad=layout_pad)
+            out_path = out_dir / filename
+            fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+            if extra_out is not None:
+                extra_out.parent.mkdir(parents=True, exist_ok=True)
+                fig.savefig(extra_out / filename, dpi=dpi, bbox_inches="tight")
             written += 1
         plt.close(fig)
 
@@ -199,6 +245,16 @@ def main():
         "--per-projector",
         action="store_true",
         help="Also write separate PNG sets per projector name",
+    )
+    parser.add_argument(
+        "--poster",
+        action="store_true",
+        help="Larger figure size, fonts, and dpi for poster slides",
+    )
+    parser.add_argument(
+        "--extra-out",
+        type=Path,
+        help="Also write figures to this directory (e.g. figures/)",
     )
     args = parser.parse_args()
 
@@ -221,14 +277,16 @@ def main():
     projectors = sorted({r.get("projector", "unknown") for r in records})
     print(f"projectors: {projectors}")
 
-    n = plot_group_summary(records, out_dir)
+    n = plot_group_summary(records, out_dir, poster=args.poster, extra_out=args.extra_out)
     print(f"wrote {n} combined figure(s) to {out_dir}")
 
     if args.per_projector:
         for projector in projectors:
             sub = out_dir / projector
             sub.mkdir(parents=True, exist_ok=True)
-            n_sub = plot_group_summary(records, sub, projector_filter=projector)
+            n_sub = plot_group_summary(
+                records, sub, projector_filter=projector, poster=args.poster, extra_out=None
+            )
             print(f"  {projector}: {n_sub} figure(s) in {sub}")
 
 

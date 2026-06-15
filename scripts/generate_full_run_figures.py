@@ -117,6 +117,41 @@ def _final_val(rows: list[dict]) -> float:
     return float(vals[-1]) if vals.size else float("nan")
 
 
+def _plot_final_bars(
+    labels: list[str],
+    vals: list[float],
+    colors: list[str],
+    *,
+    title: str = "Final validation — lower is better",
+    xlabel: str = "Validation perplexity (last checkpoint)",
+    label_decimals: int = 3,
+    xlim: tuple[float, float] | None = None,
+) -> plt.Figure:
+    """Horizontal bar chart with optional x-axis zoom for close values."""
+    fig, ax = plt.subplots(figsize=(8.5, max(4.5, 0.45 * len(labels) + 1.5)))
+    y = np.arange(len(labels))
+    ax.barh(y, vals, color=colors, height=0.65)
+    ax.set_yticks(y, labels, fontsize=10)
+    ax.set_xlabel(xlabel)
+    ax.set_title(title)
+    ax.grid(axis="x", alpha=0.3)
+
+    if xlim is not None:
+        ax.set_xlim(*xlim)
+    else:
+        lo, hi = min(vals), max(vals)
+        pad = max(0.08, (hi - lo) * 0.35)
+        ax.set_xlim(lo - pad, hi + pad)
+
+    x0, x1 = ax.get_xlim()
+    label_offset = (x1 - x0) * 0.012
+    fmt = f"{{:.{label_decimals}f}}"
+    for pos, value in zip(y, vals):
+        ax.text(value + label_offset, pos, fmt.format(value), va="center", fontsize=9)
+    fig.tight_layout()
+    return fig
+
+
 def _resolve_csv(key: str) -> Path:
     path = FULL_RUN_CSV[key]
     if not path.is_file():
@@ -235,7 +270,11 @@ def plot_comparison(out_dir: Path) -> list[Path]:
     ax.legend(fontsize=9, ncol=2, loc="upper right")
     curves = cmp_dir / "all_methods_val_curves.png"
     fig.savefig(curves, dpi=300)
+    poster_curves = ROOT / "figures" / "all_methods_val_curves.png"
+    poster_curves.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(poster_curves, dpi=300)
     plt.close(fig)
+    print(f"  also wrote {poster_curves.relative_to(ROOT)}")
 
     labels, vals, colors = [], [], []
     for label, key, proj, group in COMPARISON_RUNS:
@@ -251,18 +290,14 @@ def plot_comparison(out_dir: Path) -> list[Path]:
     vals = [vals[i] for i in order]
     colors = [colors[i] for i in order]
 
-    fig, ax = plt.subplots(figsize=(8, 4.5), tight_layout=True)
-    y = np.arange(len(labels))
-    ax.barh(y, vals, color=colors, height=0.65)
-    ax.set_yticks(y, labels, fontsize=10)
-    ax.set_xlabel("Validation perplexity (last checkpoint)")
-    ax.set_title("Final validation — lower is better")
-    ax.grid(axis="x", alpha=0.3)
-    for pos, value in zip(y, vals):
-        ax.text(value + 0.05, pos, f"{value:.2f}", va="center", fontsize=9)
+    fig = _plot_final_bars(labels, vals, colors, xlim=(11.4, 12.0))
     bars = cmp_dir / "all_methods_final_bars.png"
-    fig.savefig(bars, dpi=300)
+    fig.savefig(bars, dpi=300, bbox_inches="tight")
+    poster_bars = ROOT / "figures" / "all_methods_final_bars.png"
+    poster_bars.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(poster_bars, dpi=300, bbox_inches="tight")
     plt.close(fig)
+    print(f"  also wrote {poster_bars.relative_to(ROOT)}")
 
     pick = [
         ("GaLore2", "galore2", None, "baseline"),
@@ -285,11 +320,23 @@ def plot_comparison(out_dir: Path) -> list[Path]:
     ax.set_ylabel("Val perplexity")
     ax.set_title("Baselines vs adaptive stochastic (full run)")
     ax.grid(axis="y", alpha=0.3)
+    y0, y1 = ax.get_ylim()
+    label_offset = (y1 - y0) * 0.02
     for bar, value in zip(bars_plot, bl_vals):
-        ax.text(bar.get_x() + bar.get_width() / 2, value + 0.08, f"{value:.2f}", ha="center", fontsize=9)
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            value + label_offset,
+            f"{value:.3f}",
+            ha="center",
+            fontsize=9,
+        )
     vs_stoch = cmp_dir / "comparison_baselines_vs_stochastic.png"
     fig.savefig(vs_stoch, dpi=300)
+    poster_vs = ROOT / "figures" / "comparison_baselines_vs_stochastic.png"
+    poster_vs.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(poster_vs, dpi=300)
     plt.close(fig)
+    print(f"  also wrote {poster_vs.relative_to(ROOT)}")
 
     return [curves, bars, vs_stoch]
 
